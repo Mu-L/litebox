@@ -71,16 +71,14 @@ impl<FS: ShimFS> FilesState<FS> {
 }
 
 /// Path in the file system
-enum FsPath<P: path::Arg> {
+enum FsPath {
     /// Absolute path
-    Absolute { path: P },
-    /// Path is relative to `cwd`
-    CwdRelative { path: P },
+    Absolute { path: CString },
     /// Current working directory
     Cwd,
     /// Path is relative to a file descriptor
     #[expect(dead_code, reason = "currently unused, might want to use later")]
-    FdRelative { fd: u32, path: P },
+    FdRelative { fd: u32, path: CString },
     /// Fd
     Fd(u32),
 }
@@ -88,26 +86,43 @@ enum FsPath<P: path::Arg> {
 /// Maximum size of a file path
 pub const PATH_MAX: usize = 4096;
 
-impl<P: path::Arg> FsPath<P> {
-    fn new(dirfd: i32, path: P) -> Result<Self, Errno> {
+impl FsPath {
+    /// Create a new `FsPath` from a dirfd and path.
+    ///
+    /// CWD-relative paths are resolved immediately to absolute paths
+    /// using the CWD obtained lazily from `get_cwd` (only called when needed).
+    fn new(
+        dirfd: i32,
+        path: impl path::Arg,
+        get_cwd: impl FnOnce() -> String,
+    ) -> Result<Self, Errno> {
         let path_str = path.as_rust_str()?;
         if path_str.len() > PATH_MAX {
             return Err(Errno::ENAMETOOLONG);
         }
         let fs_path = if path_str.starts_with('/') {
-            FsPath::Absolute { path }
+            let cpath = CString::new(path_str.to_string()).map_err(|_| Errno::EINVAL)?;
+            FsPath::Absolute { path: cpath }
         } else if dirfd >= 0 {
             let dirfd = u32::try_from(dirfd).expect("dirfd >= 0");
             if path_str.is_empty() {
                 FsPath::Fd(dirfd)
             } else {
-                FsPath::FdRelative { fd: dirfd, path }
+                let cpath = CString::new(path_str.to_string()).map_err(|_| Errno::EINVAL)?;
+                FsPath::FdRelative {
+                    fd: dirfd,
+                    path: cpath,
+                }
             }
         } else if dirfd == litebox_common_linux::AT_FDCWD {
             if path_str.is_empty() {
                 FsPath::Cwd
             } else {
-                FsPath::CwdRelative { path }
+                // Resolve CWD-relative path to absolute.
+                let cwd = get_cwd();
+                let abs = alloc::format!("{cwd}{path_str}");
+                let cpath = CString::new(abs).map_err(|_| Errno::EINVAL)?;
+                FsPath::Absolute { path: cpath }
             }
         } else {
             return Err(Errno::EBADF);
@@ -177,11 +192,9 @@ impl<FS: ShimFS> Task<FS> {
         flags: OFlags,
         mode: Mode,
     ) -> Result<u32, Errno> {
-        let fs_path = FsPath::new(dirfd, pathname)?;
+        let fs_path = FsPath::new(dirfd, pathname, || self.fs.borrow().cwd.read().clone())?;
         match fs_path {
-            FsPath::Absolute { path } | FsPath::CwdRelative { path } => {
-                self.sys_open(path, flags, mode)
-            }
+            FsPath::Absolute { path } => self.sys_open(path, flags, mode),
             FsPath::Cwd => self.sys_open("", flags, mode),
             FsPath::Fd(_fd) => {
                 log_unsupported!("openat with FsPath::Fd");
@@ -230,21 +243,13 @@ impl<FS: ShimFS> Task<FS> {
             return Err(Errno::EINVAL);
         }
 
-        let fs_path = FsPath::new(dirfd, pathname)?;
+        let fs_path = FsPath::new(dirfd, pathname, || self.fs.borrow().cwd.read().clone())?;
         match fs_path {
             FsPath::Absolute { path } => {
                 if flags.contains(AtFlags::AT_REMOVEDIR) {
                     self.global.fs.rmdir(path).map_err(Errno::from)
                 } else {
                     self.global.fs.unlink(path).map_err(Errno::from)
-                }
-            }
-            FsPath::CwdRelative { path } => {
-                let resolved = self.resolve_path(path)?;
-                if flags.contains(AtFlags::AT_REMOVEDIR) {
-                    self.global.fs.rmdir(resolved).map_err(Errno::from)
-                } else {
-                    self.global.fs.unlink(resolved).map_err(Errno::from)
                 }
             }
             FsPath::Cwd => Err(Errno::EINVAL),
@@ -641,6 +646,7 @@ impl<FS: ShimFS> Task<FS> {
         pathname: impl path::Arg,
         mode: litebox_common_linux::AccessFlags,
     ) -> Result<(), Errno> {
+        let pathname = self.resolve_path(pathname)?;
         let status = self.global.fs.file_status(pathname)?;
         if mode == litebox_common_linux::AccessFlags::F_OK {
             return Ok(());
@@ -697,16 +703,14 @@ impl<FS: ShimFS> Task<FS> {
         pathname: impl path::Arg,
         buf: &mut [u8],
     ) -> Result<usize, Errno> {
-        let fspath = FsPath::new(dirfd, pathname)?;
+        let fspath = FsPath::new(dirfd, pathname, || self.fs.borrow().cwd.read().clone())?;
         let path = match fspath {
-            FsPath::Absolute { path } => self.do_readlink(path.normalized()?.as_str()),
+            FsPath::Absolute { path } => {
+                self.do_readlink(path.to_str().map_err(|_| Errno::EINVAL)?)
+            }
             FsPath::Cwd => {
                 let cwd = self.fs.borrow().cwd.read().clone();
                 self.do_readlink(&cwd)
-            }
-            FsPath::CwdRelative { path } => {
-                let resolved = self.resolve_path(path)?;
-                self.do_readlink(resolved.to_str().map_err(|_| Errno::EINVAL)?)
             }
             FsPath::Fd(_) | FsPath::FdRelative { .. } => unimplemented!(),
         }?;
@@ -911,6 +915,7 @@ impl<FS: ShimFS> Task<FS> {
 
     /// Handle syscall `stat`
     pub fn sys_stat(&self, pathname: impl path::Arg) -> Result<FileStat, Errno> {
+        let pathname = self.resolve_path(pathname)?;
         self.do_stat(pathname, true)
     }
 
@@ -920,6 +925,7 @@ impl<FS: ShimFS> Task<FS> {
     /// then it returns information about the link itself, not the file that the link refers to.
     /// TODO: we do not support symbolic links yet.
     pub fn sys_lstat(&self, pathname: impl path::Arg) -> Result<FileStat, Errno> {
+        let pathname = self.resolve_path(pathname)?;
         self.do_stat(pathname, false)
     }
 
@@ -950,14 +956,10 @@ impl<FS: ShimFS> Task<FS> {
         }
 
         let files = self.files.borrow();
-        let fs_path = FsPath::new(dirfd, pathname)?;
+        let fs_path = FsPath::new(dirfd, pathname, || self.fs.borrow().cwd.read().clone())?;
         let fstat: FileStat = match fs_path {
             FsPath::Absolute { path } => {
                 self.do_stat(path, !flags.contains(AtFlags::AT_SYMLINK_NOFOLLOW))?
-            }
-            FsPath::CwdRelative { path } => {
-                let resolved = self.resolve_path(path)?;
-                self.do_stat(resolved, !flags.contains(AtFlags::AT_SYMLINK_NOFOLLOW))?
             }
             FsPath::Cwd => self.global.fs.file_status("")?.into(),
             FsPath::Fd(fd) => files
