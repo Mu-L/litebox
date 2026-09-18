@@ -666,6 +666,9 @@ impl<Platform: sync::RawSyncPrimitivesProvider, Backend: super::backend::Backend
             .entry_handle(fd)
             .ok_or(ReadError::ClosedFd)?;
         let mut entry = entry.get_entry_mut();
+        if entry.entry.path_only {
+            return Err(ReadError::NotForReading);
+        }
         // XXX(jayb): This over-holds the descriptor-entry lock across backend I/O. We need a
         // smaller per-open-file-description primitive for position/append serialization, so the
         // descriptor entry can be unlocked before potentially blocking backend calls.
@@ -676,10 +679,6 @@ impl<Platform: sync::RawSyncPrimitivesProvider, Backend: super::backend::Backend
         let seek_behavior = entry.entry.seek_behavior;
         if !entry.entry.read_allowed {
             return Err(ReadError::NotForReading);
-        }
-        if entry.entry.path_only {
-            // TODO(jayb): Add an error variant for operations not permitted on O_PATH fds.
-            unimplemented!("read from O_PATH fd")
         }
 
         let read_offset = match seek_behavior {
@@ -714,6 +713,9 @@ impl<Platform: sync::RawSyncPrimitivesProvider, Backend: super::backend::Backend
             .entry_handle(fd)
             .ok_or(WriteError::ClosedFd)?;
         let mut entry = entry.get_entry_mut();
+        if entry.entry.path_only {
+            return Err(WriteError::NotForWriting);
+        }
         // XXX(jayb): This over-holds the descriptor-entry lock across backend I/O. We need a
         // smaller per-open-file-description primitive for position/append serialization, so the
         // descriptor entry can be unlocked before potentially blocking backend calls.
@@ -724,10 +726,6 @@ impl<Platform: sync::RawSyncPrimitivesProvider, Backend: super::backend::Backend
         let seek_behavior = entry.entry.seek_behavior;
         if !entry.entry.write_allowed {
             return Err(WriteError::NotForWriting);
-        }
-        if entry.entry.path_only {
-            // TODO(jayb): Add an error variant for operations not permitted on O_PATH fds.
-            unimplemented!("write to O_PATH fd")
         }
 
         let write_offset = match seek_behavior {
@@ -767,8 +765,7 @@ impl<Platform: sync::RawSyncPrimitivesProvider, Backend: super::backend::Backend
             Handle::Dir(_) => return Err(SeekError::NotAFile),
         };
         if entry.entry.path_only {
-            // TODO(jayb): Add an error variant for operations not permitted on O_PATH fds.
-            unimplemented!("seek on O_PATH fd")
+            return Err(SeekError::NotOpenForSeeking);
         }
 
         match entry.entry.seek_behavior {
@@ -821,12 +818,11 @@ impl<Platform: sync::RawSyncPrimitivesProvider, Backend: super::backend::Backend
             Handle::File(file) => file,
             Handle::Dir(_) => return Err(TruncateError::IsDirectory),
         };
+        if entry.entry.path_only {
+            return Err(TruncateError::NotOpenForWriting);
+        }
         if !entry.entry.write_allowed {
             return Err(TruncateError::NotForWriting);
-        }
-        if entry.entry.path_only {
-            // TODO(jayb): Add an error variant for operations not permitted on O_PATH fds.
-            unimplemented!("truncate O_PATH fd")
         }
 
         self.backend.truncate(file, length)?;
@@ -972,8 +968,7 @@ impl<Platform: sync::RawSyncPrimitivesProvider, Backend: super::backend::Backend
             .ok_or(ReadDirError::ClosedFd)?;
         let entry = entry.get_entry();
         if entry.entry.path_only {
-            // TODO(jayb): Add an error variant for operations not permitted on O_PATH fds.
-            unimplemented!("read_dir on O_PATH fd")
+            return Err(ReadDirError::NotOpenForReading);
         }
         let dir = match &entry.entry.handle {
             Handle::File(_) => return Err(ReadDirError::NotADirectory),
