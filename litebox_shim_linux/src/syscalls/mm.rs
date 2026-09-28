@@ -7,17 +7,15 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use litebox::fs::errors::ReadError;
-use litebox::{
-    mm::vmem::{MappingError, PAGE_SIZE, PageRange},
-    platform::{
-        PageManagementProvider, RawConstPointer,
-        page_mgmt::{FixedAddressBehavior, MemoryRegionPermissions},
-    },
+use litebox::platform::{
+    PageManagementProvider, RawConstPointer,
+    page_mgmt::{FixedAddressBehavior, MemoryRegionPermissions},
 };
 use litebox_common_linux::{
     MRemapFlags, MapFlags, ProtFlags,
     errno::Errno,
     loader::{TRAMPOLINE_HEADER_SIZE, TrampolineHeader64},
+    vmem::{MappingError, PAGE_SIZE, PageRange},
 };
 
 use crate::FileFd;
@@ -128,15 +126,9 @@ impl<Platform: ShimPlatform> Task<Platform> {
         ensure_space_after: bool,
         op: impl FnOnce(UserPtrMut<u8>) -> Result<usize, MappingError>,
     ) -> Result<UserPtrMut<u8>, MappingError> {
-        litebox_common_linux::mm::do_mmap(
-            &self.global.pm,
-            suggested_addr,
-            len,
-            prot,
-            flags,
-            ensure_space_after,
-            op,
-        )
+        self.global
+            .mm
+            .do_mmap(suggested_addr, len, prot, flags, ensure_space_after, op)
     }
 
     #[inline]
@@ -168,7 +160,7 @@ impl<Platform: ShimPlatform> Task<Platform> {
 
         // Perform the normal mmap first (CoW or memcpy fallback).
         let result = if let Some(cow_result) =
-            self.try_cow_mmap_file(suggested_addr, len, &prot, &flags, &typed_fd, offset)
+            self.try_cow_mmap_file(suggested_addr, len, prot, flags, &typed_fd, offset)
         {
             cow_result?
         } else {
@@ -221,8 +213,8 @@ impl<Platform: ShimPlatform> Task<Platform> {
         &self,
         suggested_addr: Option<usize>,
         len: usize,
-        prot: &ProtFlags,
-        flags: &MapFlags,
+        prot: ProtFlags,
+        flags: MapFlags,
         fd: &FileFd<Platform>,
         offset: usize,
     ) -> Option<Result<UserPtrMut<u8>, MappingError>> {
@@ -287,7 +279,7 @@ impl<Platform: ShimPlatform> Task<Platform> {
                 // SAFETY: ptr is the freshly CoW-mapped region of exactly `len` bytes with
                 // `permissions`.
                 unsafe {
-                    self.global.pm.register_existing_mapping(
+                    self.global.mm.register_existing_mapping(
                         range,
                         permissions,
                         true,
@@ -431,7 +423,7 @@ impl<Platform: ShimPlatform> Task<Platform> {
     /// patching logic to avoid deadlocks (the patch path holds elf_patch_cache).
     #[inline]
     fn sys_munmap_raw(&self, addr: UserPtrMut<u8>, len: usize) -> Result<(), Errno> {
-        litebox_common_linux::mm::sys_munmap(&self.global.pm, addr, len)
+        self.global.mm.sys_munmap(addr, len)
     }
 
     /// Clear `file_mappings` entries for any segments that overlap the
@@ -483,7 +475,7 @@ impl<Platform: ShimPlatform> Task<Platform> {
         len: usize,
         prot: ProtFlags,
     ) -> Result<(), Errno> {
-        litebox_common_linux::mm::sys_mprotect(&self.global.pm, addr, len, prot)
+        self.global.mm.sys_mprotect(addr, len, prot)
     }
 
     #[inline]
@@ -495,20 +487,21 @@ impl<Platform: ShimPlatform> Task<Platform> {
         flags: MRemapFlags,
         new_addr: usize,
     ) -> Result<UserPtrMut<u8>, Errno> {
-        litebox_common_linux::mm::sys_mremap(
-            &self.global.pm,
-            old_addr,
-            old_size,
-            new_size,
-            flags,
-            new_addr,
-        )
+        self.global
+            .mm
+            .sys_mremap(old_addr, old_size, new_size, flags, new_addr)
     }
 
     /// Handle syscall `brk`
     #[inline]
     pub(crate) fn sys_brk(&self, addr: UserPtrMut<u8>) -> Result<usize, Errno> {
-        litebox_common_linux::mm::sys_brk(&self.global.pm, addr)
+        unsafe {
+            self.global
+                .mm
+                .brk(addr.as_usize())
+                .or_else(|_| self.global.mm.brk(0))
+        }
+        .map_err(Errno::from)
     }
 
     /// Handle syscall `madvise`
@@ -519,7 +512,7 @@ impl<Platform: ShimPlatform> Task<Platform> {
         len: usize,
         advice: litebox_common_linux::MadviseBehavior,
     ) -> Result<(), Errno> {
-        litebox_common_linux::mm::sys_madvise(&self.global.pm, addr, len, advice)
+        self.global.mm.sys_madvise(addr, len, advice)
     }
 
     // ── Runtime ELF syscall patching ─────────────────────────────────────

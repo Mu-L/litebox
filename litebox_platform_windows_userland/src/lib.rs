@@ -16,7 +16,6 @@ use std::os::raw::c_void;
 use std::os::windows::io::AsRawHandle as _;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use litebox::mm::vmem::PAGE_SIZE;
 use litebox::platform::ImmediatelyWokenUp;
 use litebox::platform::UnblockedOrTimedOut;
 use litebox::platform::page_mgmt::{
@@ -42,6 +41,8 @@ use windows_sys::Win32::{
 use zerocopy::{FromBytes, IntoBytes};
 
 extern crate alloc;
+
+const PAGE_SIZE: usize = 4096;
 
 mod page_mgmt;
 
@@ -2153,18 +2154,20 @@ impl<const ALIGN: usize> litebox::platform::CrngProvider for WindowsUserland<ALI
 /// Dummy `VmemPageFaultHandler`.
 ///
 /// Page faults are handled transparently by the host Windows kernel.
-/// Provided to satisfy trait bounds for `PageManager::handle_page_fault`.
-impl<const ALIGN: usize> litebox::mm::vmem::VmemPageFaultHandler for WindowsUserland<ALIGN> {
+/// Provided to satisfy trait bounds for `MemoryManager::handle_page_fault`.
+impl<const ALIGN: usize> litebox_common_linux::vmem::VmemPageFaultHandler
+    for WindowsUserland<ALIGN>
+{
     unsafe fn handle_page_fault(
         &self,
         _fault_addr: usize,
-        _flags: litebox::mm::vmem::VmFlags,
+        _flags: litebox_common_linux::vmem::VmFlags,
         _error_code: u64,
-    ) -> Result<(), litebox::mm::vmem::PageFaultError> {
+    ) -> Result<(), litebox_common_linux::vmem::PageFaultError> {
         unreachable!("host kernel handles page faults for Windows userland")
     }
 
-    fn access_error(_error_code: u64, _flags: litebox::mm::vmem::VmFlags) -> bool {
+    fn access_error(_error_code: u64, _flags: litebox_common_linux::vmem::VmFlags) -> bool {
         unreachable!("host kernel handles page faults for Windows userland")
     }
 }

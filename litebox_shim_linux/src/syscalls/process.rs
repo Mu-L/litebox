@@ -14,12 +14,12 @@ use core::ops::Range;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 use litebox::event::wait::WaitError;
-use litebox::mm::vmem::VmFlags;
 use litebox::platform::TimerHandle;
 use litebox::platform::{ArchSpecificRegister, RawMutex as _};
 use litebox::platform::{Instant as _, SystemTime as _, TimeProvider};
 use litebox::sync::{Mutex, RwLock};
 use litebox::utils::TruncateExt as _;
+use litebox_common_linux::vmem::VmFlags;
 use litebox_common_linux::{
     ArchPrctlArg, CloneFlags, FutexArgs, IntervalTimer, ItimerVal, PrctlArg, TimeParam,
     errno::Errno,
@@ -1512,7 +1512,7 @@ impl<Platform: ShimPlatform> Task<Platform> {
 
         // Don't release reserved mappings.
         let release = |_r: Range<usize>, vm: VmFlags| !vm.is_empty();
-        unsafe { self.global.pm.release_memory(release) }
+        unsafe { self.global.mm.release_memory(release) }
             .expect("failed to release memory mappings");
 
         self.global

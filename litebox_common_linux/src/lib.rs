@@ -25,6 +25,7 @@ pub mod physical_pointers;
 pub mod signal;
 pub mod user_pointers;
 pub mod vmap;
+pub mod vmem;
 
 extern crate alloc;
 
@@ -101,7 +102,7 @@ pub mod ioctl {
 
 bitflags::bitflags! {
     /// Desired memory protection of a memory mapping.
-    #[derive(PartialEq, Debug)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct ProtFlags: core::ffi::c_int {
         /// Pages cannot be accessed.
         const PROT_NONE = 0;
@@ -128,7 +129,7 @@ bitflags::bitflags! {
 
 bitflags::bitflags! {
     /// Additional parameters for [`mmap`].
-    #[derive(Debug)]
+    #[derive(Clone, Copy, Debug)]
     pub struct MapFlags: core::ffi::c_int {
         /// Share this mapping. Mutually exclusive with `MAP_PRIVATE`.
         const MAP_SHARED = 0x1;
