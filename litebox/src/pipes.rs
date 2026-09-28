@@ -162,19 +162,6 @@ impl<Platform: RawSyncPrimitivesProvider + TimeProvider> Pipes<Platform> {
         }
         Ok(())
     }
-
-    /// Perform `f` with the [`IOPollable`] associated with the pipe at `fd`.
-    pub fn with_iopollable<R>(
-        &self,
-        fd: &PipeFd<Platform>,
-        f: impl FnOnce(&dyn IOPollable) -> R,
-    ) -> Result<R, errors::ClosedError> {
-        let dt = self.litebox.descriptor_table();
-        match &dt.get_entry(fd).ok_or(errors::ClosedError::ClosedFd)?.entry {
-            PipeEnd::Receiver(p) => Ok(f(p)),
-            PipeEnd::Sender(p) => Ok(f(p)),
-        }
-    }
 }
 
 /// Whether a particular pipe end is the sender half or the receiver half
@@ -728,4 +715,20 @@ crate::fd::enable_fds_for_subsystem! {
     @Platform: { RawSyncPrimitivesProvider + TimeProvider };
     PipeEnd<Platform>;
     -> PipeFd<Platform>;
+}
+
+impl<Platform: RawSyncPrimitivesProvider + TimeProvider> IOPollable for DescriptorEntry<Platform> {
+    fn register_observer(&self, observer: Weak<dyn Observer<Events>>, mask: Events) {
+        match &self.entry {
+            PipeEnd::Receiver(receiver) => receiver.register_observer(observer, mask),
+            PipeEnd::Sender(sender) => sender.register_observer(observer, mask),
+        }
+    }
+
+    fn check_io_events(&self) -> Events {
+        match &self.entry {
+            PipeEnd::Receiver(receiver) => receiver.check_io_events(),
+            PipeEnd::Sender(sender) => sender.check_io_events(),
+        }
+    }
 }
